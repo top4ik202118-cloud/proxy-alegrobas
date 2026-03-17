@@ -1,66 +1,69 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
-from bs4 import BeautifulSoup
 import time
 import json
-from urllib.parse import urljoin
 
 app = Flask(__name__)
-# Разрешаем запросы с любого домена (для GitHub Pages)
-CORS(app, origins=['*'])  # Временно разрешим всё
+CORS(app)
 
-# DeepSeek API ключ
-DEEPSEEK_API_KEY = "sk-527d196cdfab470ea3fcf70f3b535d86"
+# OpenRouter API ключ (твой)
+OPENROUTER_API_KEY = "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"
 
-# Кэш для законов
-laws_cache = {}
-CACHE_TIME = 3600  # 1 час
-
-# Словарь с ссылками на все 18 серверов
+# Список серверов
 SERVERS = {
-    1: {"name": "New York", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.84/"},
-    2: {"name": "Detroit", "urls": ["https://forum.majestic-rp.ru/forums/kodeksy.353/", "https://forum.majestic-rp.ru/forums/zakony.354/"]},
-    3: {"name": "Chicago", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.255/"},
-    4: {"name": "San Francisco", "url": "https://forum.majestic-rp.ru/forums/odobrennyye-zakonoproyekty.344/"},
-    5: {"name": "Atlanta", "url": "https://forum.majestic-rp.ru/forums/odobrennyye-zakonoproyekty.562/"},
-    6: {"name": "San Diego", "url": "https://forum.majestic-rp.ru/forums/normativno-pravovyye-akty.580/"},
-    7: {"name": "Los Angeles", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.693/"},
-    8: {"name": "Miami", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.773/"},
-    9: {"name": "Las Vegas", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.820/"},
-    10: {"name": "Washington", "url": "https://forum.majestic-rp.ru/forums/odobrennyye-zakonoproyekty.895/"},
-    11: {"name": "Dallas", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.954/"},
-    12: {"name": "Boston", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1017/"},
-    13: {"name": "Houston", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1104/"},
-    14: {"name": "Seattle", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1163/"},
-    15: {"name": "Phoenix", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1213/"},
-    16: {"name": "Denver", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1276/"},
-    17: {"name": "Portland", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1338/"},
-    18: {"name": "Orlando", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1405/"}
+    1: "New York", 2: "Detroit", 3: "Chicago", 4: "San Francisco",
+    5: "Atlanta", 6: "San Diego", 7: "Los Angeles", 8: "Miami",
+    9: "Las Vegas", 10: "Washington", 11: "Dallas", 12: "Boston",
+    13: "Houston", 14: "Seattle", 15: "Phoenix", 16: "Denver",
+    17: "Portland", 18: "Orlando"
 }
 
-def parse_xenforo_thread(url):
-    """Парсит отдельную тему с законом"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        first_post = soup.select_one('.message-main .bbWrapper')
-        if first_post:
-            return first_post.get_text('\n', strip=True)
-    except Exception as e:
-        print(f"Error parsing thread {url}: {e}")
-    return None
+@app.route('/api/health')
+def health():
+    return jsonify({"status": "ok", "servers": len(SERVERS)})
 
-def parse_forum_section(url):
-    """Парсит раздел форума"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-    laws = []
+@app.route('/api/servers')
+def list_servers():
+    servers_list = [{"id": sid, "name": name} for sid, name in SERVERS.items()]
+    return jsonify(servers_list)
+
+@app.route('/api/ask', methods=['POST'])
+def ask_ai():
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        threads = soup.select('.
+        data = request.json
+        question = data.get('question', '')
+        server_id = data.get('server_id')
+        
+        server_name = SERVERS.get(server_id, f"Server {server_id}")
+        
+        prompt = f"Ты юридический помощник для RP сервера {server_name}. Ответь на русском: {question}"
+        
+        response = requests.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            headers={
+                'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'model': 'openrouter/hunter-alpha',
+                'messages': [
+                    {'role': 'system', 'content': 'Ты помощник для RP сервера. Отвечай кратко и по делу.'},
+                    {'role': 'user', 'content': prompt}
+                ]
+            },
+            timeout=30
+        )
+        
+        result = response.json()
+        
+        if 'choices' in result:
+            return jsonify({'answer': result['choices'][0]['message']['content']})
+        else:
+            return jsonify({'error': 'No response from AI'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
