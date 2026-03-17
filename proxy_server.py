@@ -7,7 +7,8 @@ import json
 from urllib.parse import urljoin
 
 app = Flask(__name__)
-CORS(app, origins=['https://top4ik202118-cloud.github.io', 'http://localhost'])
+# Разрешаем запросы с любого домена (для GitHub Pages)
+CORS(app, origins=['*'])  # Временно разрешим всё
 
 # DeepSeek API ключ
 DEEPSEEK_API_KEY = "sk-527d196cdfab470ea3fcf70f3b535d86"
@@ -130,7 +131,7 @@ def ask_ai():
 Если информации недостаточно - задай уточняющий вопрос.
 Ответ должен быть четким, по делу, со ссылками на статьи."""
 
-        print(f"Sending to DeepSeek: {prompt[:200]}...")  # Лог для отладки
+        print(f"Sending to DeepSeek: {prompt[:200]}...")
         
         response = requests.post(
             'https://api.deepseek.com/v1/chat/completions',
@@ -150,14 +151,13 @@ def ask_ai():
             timeout=30
         )
         
-        # Проверяем статус ответа
         if response.status_code != 200:
             print(f"DeepSeek API error: {response.status_code}")
             print(f"Response: {response.text}")
             return jsonify({'error': f'DeepSeek API returned {response.status_code}'}), 500
         
         result = response.json()
-        print(f"DeepSeek response: {result}")  # Лог для отладки
+        print(f"DeepSeek response: {result}")
         
         if 'choices' in result and len(result['choices']) > 0:
             answer = result['choices'][0]['message']['content']
