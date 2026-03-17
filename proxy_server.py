@@ -9,14 +9,14 @@ from urllib.parse import urljoin
 app = Flask(__name__)
 CORS(app, origins=['*'])
 
-# Твой ключ OpenRouter (создай новый если старый отключился)
-OPENROUTER_API_KEY = "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"
+# ===== GEMINI API КЛЮЧ =====
+GEMINI_API_KEY = "AIzaSyBpjIz078W8OlF03oapejYOjfHD0oBB3UM"  # Вставь ключ из AI Studio
 
-# Кэш для законов
+# ===== КЭШ ДЛЯ ЗАКОНОВ =====
 laws_cache = {}
 CACHE_TIME = 3600  # 1 час
 
-# Словарь с ссылками на все 18 серверов
+# ===== СЛОВАРЬ СЕРВЕРОВ =====
 SERVERS = {
     1: {"name": "New York", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.84/"},
     2: {"name": "Detroit", "urls": ["https://forum.majestic-rp.ru/forums/kodeksy.353/", "https://forum.majestic-rp.ru/forums/zakony.354/"]},
@@ -40,12 +40,10 @@ SERVERS = {
 
 def parse_xenforo_thread(url):
     """Парсит отдельную тему с законом"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = 'utf-8'  # Явно указываем кодировку
+        response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         first_post = soup.select_one('.message-main .bbWrapper')
         if first_post:
@@ -56,14 +54,11 @@ def parse_xenforo_thread(url):
 
 def parse_forum_section(url):
     """Парсит раздел форума"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     laws = []
     try:
-        print(f"Parsing section: {url}")
         response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = 'utf-8'  # Явно указываем кодировку
+        response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         threads = soup.select('.structItem--thread')
         
@@ -73,11 +68,7 @@ def parse_forum_section(url):
                 title = title_elem.get_text(strip=True)
                 thread_url = urljoin(url, title_elem['href'])
                 law_text = parse_xenforo_thread(thread_url)
-                laws.append({
-                    "title": title,
-                    "url": thread_url,
-                    "text": law_text
-                })
+                laws.append({"title": title, "url": thread_url, "text": law_text})
                 time.sleep(1)
     except Exception as e:
         print(f"Error parsing section {url}: {e}")
@@ -109,24 +100,23 @@ def get_laws(server_id):
 
 @app.route('/api/ask', methods=['POST'])
 def ask_ai():
-    """Отправляет вопрос в OpenRouter с правильной кодировкой"""
+    """Отправляет вопрос в Gemini"""
     try:
         data = request.json
         question = data.get('question', '')
         server_id = data.get('server_id')
         server_laws = data.get('laws', [])
         
-        # Формируем текст законов для контекста
+        # Формируем текст законов
         laws_text = ""
-        for law in server_laws[:5]:  # Берем только 5 законов чтобы не перегружать
+        for law in server_laws[:7]:
             if law.get('text'):
-                # Берём первые 300 символов каждого закона
-                short_text = law['text'][:300] + "..." if len(law['text']) > 300 else law['text']
+                short_text = law['text'][:400] + "..." if len(law['text']) > 400 else law['text']
                 laws_text += f"\n📌 {law['title']}:\n{short_text}\n"
         
         server_name = SERVERS.get(server_id, {}).get('name', f'Сервер {server_id}')
         
-        # Простой промпт без сложных символов
+        # Промпт для Gemini
         prompt = f"""Ты юридический помощник для RP сервера {server_name}.
 
 Законы сервера:
@@ -135,41 +125,37 @@ def ask_ai():
 Вопрос: {question}
 
 Ответь строго по структуре:
-1. КРАТКИЙ ОТВЕТ: да/нет, можно/нельзя
-2. СТАТЬИ: какие статьи из законов подходят
-3. ОБЪЯСНЕНИЕ: почему
-4. РЕКОМЕНДАЦИЯ: что делать"""
+📌 1. КРАТКИЙ ИТОГ: [да/нет, можно/нельзя]
+⚖️ 2. СТАТЬИ: [какие статьи из законов выше подходят]
+💡 3. ОБЪЯСНЕНИЕ: [почему]
+🚀 4. РЕКОМЕНДАЦИЯ: [что делать]
 
-        # Отправляем с правильной кодировкой
+Отвечай ТОЛЬКО на основе законов выше. Если в законах нет информации — напиши "❌ В законах нет ответа на этот вопрос"."""
+
+        # Отправляем в Gemini API
         response = requests.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Authorization': f'Bearer {OPENROUTER_API_KEY}',
-                'Content-Type': 'application/json; charset=utf-8',
-                'Accept-Charset': 'utf-8',
-                'HTTP-Referer': 'https://top4ik202118-cloud.github.io/alegrobas-bot/',
-                'X-Title': 'Alegrobas Bot'
-            },
+            f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}',
+            headers={'Content-Type': 'application/json'},
             json={
-                'model': 'openrouter/hunter-alpha',
-                'messages': [
-                    {'role': 'system', 'content': 'Ты юридический помощник. Отвечай по законам.'},
-                    {'role': 'user', 'content': prompt}
-                ],
-                'temperature': 0.1,
-                'max_tokens': 1500
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 1500
+                }
             },
             timeout=30
         )
         
         if response.status_code == 200:
             result = response.json()
-            answer = result['choices'][0]['message']['content']
+            answer = result['candidates'][0]['content']['parts'][0]['text']
             return jsonify({'answer': answer})
         else:
-            print(f"OpenRouter error: {response.status_code}")
+            print(f"Gemini error: {response.status_code}")
             print(f"Response: {response.text}")
-            return jsonify({'error': f'OpenRouter API returned {response.status_code}'}), 500
+            return jsonify({'error': f'Gemini API returned {response.status_code}'}), 500
                 
     except Exception as e:
         print(f"Error: {str(e)}")
