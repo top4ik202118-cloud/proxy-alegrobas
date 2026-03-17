@@ -5,12 +5,34 @@ from bs4 import BeautifulSoup
 import time
 import json
 from urllib.parse import urljoin
+from datetime import datetime, timedelta
+import threading
 
 app = Flask(__name__)
 CORS(app, origins=['*'])
 
 # ===== GEMINI API КЛЮЧ =====
-GEMINI_API_KEY = "AIzaSyBpjIz078W8OlF03oapejYOjfHD0oBB3UM"  # Вставь ключ из AI Studio
+GEMINI_API_KEY = "твой_ключ_сюда"
+
+# ===== ЗАЩИТА ОТ 429 =====
+class RateLimiter:
+    def __init__(self):
+        self.requests = []  # храним время запросов
+        self.lock = threading.Lock()
+    
+    def can_proceed(self):
+        """Проверяем, можем ли делать запрос"""
+        with self.lock:
+            now = datetime.now()
+            # Удаляем запросы старше минуты
+            self.requests = [t for t in self.requests if t > now - timedelta(minutes=1)]
+            
+            if len(self.requests) < 50:  # максимум 50 запросов в минуту
+                self.requests.append(now)
+                return True
+            return False
+
+rate_limiter = RateLimiter()
 
 # ===== КЭШ ДЛЯ ЗАКОНОВ =====
 laws_cache = {}
@@ -37,6 +59,14 @@ SERVERS = {
     17: {"name": "Portland", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1338/"},
     18: {"name": "Orlando", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1405/"}
 }
+
+# Модели для перебора (если одна выдаёт 429, пробуем другую)
+# Модели для перебора (только с нормальными лимитами!)
+GEMINI_MODELS = [
+    'gemini-2.0-flash',        # 1500 запросов в день ✅
+    'gemini-2.0-flash-lite',   # тоже норм
+    'gemini-1.5-flash'         # старый, но стабильный
+]
 
 def parse_xenforo_thread(url):
     """Парсит отдельную тему с законом"""
@@ -100,12 +130,16 @@ def get_laws(server_id):
 
 @app.route('/api/ask', methods=['POST'])
 def ask_ai():
-    """Отправляет вопрос в Gemini"""
+    """Отправляет вопрос в Gemini с защитой от 429"""
     try:
         data = request.json
         question = data.get('question', '')
         server_id = data.get('server_id')
         server_laws = data.get('laws', [])
+        
+        # Проверяем, не превысили ли мы лимит
+        if not rate_limiter.can_proceed():
+            return jsonify({'answer': '⚠️ Слишком много запросов. Подождите минуту и попробуйте снова.'})
         
         # Формируем текст законов
         laws_text = ""
@@ -132,30 +166,50 @@ def ask_ai():
 
 Отвечай ТОЛЬКО на основе законов выше. Если в законах нет информации — напиши "❌ В законах нет ответа на этот вопрос"."""
 
-        # Отправляем в Gemini API
-        response = requests.post(
-            f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}',
-            headers={'Content-Type': 'application/json'},
-            json={
-                "contents": [{
-                    "parts": [{"text": prompt}]
-                }],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "maxOutputTokens": 1500
-                }
-            },
-            timeout=30
-        )
+        # Пробуем разные модели по очереди
+        last_error = None
+        for model in GEMINI_MODELS:
+            try:
+                time.sleep(1)  # Задержка между попытками
+                
+                response = requests.post(
+                    f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}',
+                    headers={'Content-Type': 'application/json'},
+                    json={
+                        "contents": [{
+                            "parts": [{"text": prompt}]
+                        }],
+                        "generationConfig": {
+                            "temperature": 0.1,
+                            "maxOutputTokens": 1500
+                        }
+                    },
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = result['candidates'][0]['content']['parts'][0]['text']
+                    return jsonify({'answer': answer})
+                elif response.status_code == 429:
+                    print(f"Model {model} rate limited: {response.status_code}")
+                    last_error = f"Model {model} rate limited"
+                    continue  # пробуем следующую модель
+                else:
+                    print(f"Gemini error with {model}: {response.status_code}")
+                    print(f"Response: {response.text}")
+                    last_error = f"Gemini API returned {response.status_code}"
+                    
+            except Exception as e:
+                print(f"Error with model {model}: {str(e)}")
+                last_error = str(e)
+                continue
         
-        if response.status_code == 200:
-            result = response.json()
-            answer = result['candidates'][0]['content']['parts'][0]['text']
-            return jsonify({'answer': answer})
+        # Если все модели не сработали
+        if "rate limited" in str(last_error):
+            return jsonify({'answer': '⚠️ Лимит запросов исчерпан. Попробуйте через несколько минут.'})
         else:
-            print(f"Gemini error: {response.status_code}")
-            print(f"Response: {response.text}")
-            return jsonify({'error': f'Gemini API returned {response.status_code}'}), 500
+            return jsonify({'error': last_error}), 500
                 
     except Exception as e:
         print(f"Error: {str(e)}")
