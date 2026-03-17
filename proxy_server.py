@@ -7,7 +7,7 @@ import json
 from urllib.parse import urljoin
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=['https://top4ik202118-cloud.github.io', 'http://localhost'])
 
 # DeepSeek API ключ
 DEEPSEEK_API_KEY = "sk-527d196cdfab470ea3fcf70f3b535d86"
@@ -107,18 +107,19 @@ def get_laws(server_id):
 @app.route('/api/ask', methods=['POST'])
 def ask_ai():
     """Отправляет вопрос в DeepSeek и получает ответ"""
-    data = request.json
-    question = data.get('question')
-    server_id = data.get('server_id')
-    server_laws = data.get('laws', [])
-    
-    # Формируем промпт с законами сервера
-    laws_text = ""
-    for law in server_laws[:10]:  # Берем первые 10 законов
-        if law.get('text'):
-            laws_text += f"\n{law['title']}:\n{law['text'][:500]}...\n"
-    
-    prompt = f"""Ты - юридический помощник для RP сервера {server_id}. 
+    try:
+        data = request.json
+        question = data.get('question', '')
+        server_id = data.get('server_id')
+        server_laws = data.get('laws', [])
+        
+        # Формируем промпт с законами сервера
+        laws_text = ""
+        for law in server_laws[:10]:
+            if law.get('text'):
+                laws_text += f"\n{law['title']}:\n{law['text'][:500]}...\n"
+        
+        prompt = f"""Ты - юридический помощник для RP сервера {server_id}. 
 Отвечай на русском языке, давай развернутые ответы со ссылками на конкретные статьи.
 
 Законы сервера:
@@ -129,7 +130,8 @@ def ask_ai():
 Если информации недостаточно - задай уточняющий вопрос.
 Ответ должен быть четким, по делу, со ссылками на статьи."""
 
-    try:
+        print(f"Sending to DeepSeek: {prompt[:200]}...")  # Лог для отладки
+        
         response = requests.post(
             'https://api.deepseek.com/v1/chat/completions',
             headers={
@@ -148,13 +150,29 @@ def ask_ai():
             timeout=30
         )
         
+        # Проверяем статус ответа
+        if response.status_code != 200:
+            print(f"DeepSeek API error: {response.status_code}")
+            print(f"Response: {response.text}")
+            return jsonify({'error': f'DeepSeek API returned {response.status_code}'}), 500
+        
         result = response.json()
+        print(f"DeepSeek response: {result}")  # Лог для отладки
+        
         if 'choices' in result and len(result['choices']) > 0:
-            return jsonify({'answer': result['choices'][0]['message']['content']})
+            answer = result['choices'][0]['message']['content']
+            return jsonify({'answer': answer})
+        elif 'error' in result:
+            return jsonify({'error': f"DeepSeek API error: {result['error']}"}), 500
         else:
-            return jsonify({'error': 'Invalid API response'}), 500
+            return jsonify({'error': 'Invalid API response format', 'details': result}), 500
             
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'DeepSeek API timeout'}), 500
+    except requests.exceptions.ConnectionError:
+        return jsonify({'error': 'Connection error to DeepSeek API'}), 500
     except Exception as e:
+        print(f"Unexpected error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/servers')
