@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 app = Flask(__name__)
 CORS(app, origins=['*'])
 
-# OpenRouter API ключ (твой)
+# Твой ключ OpenRouter
 OPENROUTER_API_KEY = "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"
 
 # Кэш для законов
@@ -38,6 +38,16 @@ SERVERS = {
     18: {"name": "Orlando", "url": "https://forum.majestic-rp.ru/forums/zakonodatel-naya-baza.1405/"}
 }
 
+# Список бесплатных моделей
+FREE_MODELS = [
+    'openrouter/hunter-alpha',      # 1T параметров, 1M контекст
+    'openrouter/healer-alpha',      # мультимодальная
+    'nvidia/nemotron-3-super',      # 120B параметров
+    'meta-llama/llama-3.3-70b',     # Llama 3.3
+    'mistralai/mistral-small-3.1',  # Mistral
+    'openrouter/free'                # авто-выбор
+]
+
 def parse_xenforo_thread(url):
     """Парсит отдельную тему с законом"""
     headers = {
@@ -54,40 +64,57 @@ def parse_xenforo_thread(url):
     return None
 
 def parse_forum_section(url):
-    """Парсит раздел форума"""
+    """Парсит раздел форума, собирает все темы с законами"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     laws = []
     try:
+        print(f"Parsing section: {url}")
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Ищем все темы в разделе
         threads = soup.select('.structItem--thread')
+        print(f"Found {len(threads)} threads")
         
         for thread in threads:
             title_elem = thread.select_one('.structItem-title a')
             if title_elem:
                 title = title_elem.get_text(strip=True)
                 thread_url = urljoin(url, title_elem['href'])
+                
+                print(f"  Processing: {title}")
+                
+                # Получаем текст закона из темы
                 law_text = parse_xenforo_thread(thread_url)
+                
                 laws.append({
                     "title": title,
                     "url": thread_url,
                     "text": law_text
                 })
-                time.sleep(1)
+                
+                time.sleep(1)  # Задержка между запросами
     except Exception as e:
         print(f"Error parsing section {url}: {e}")
+    
     return laws
 
 @app.route('/api/laws/<int:server_id>')
 def get_laws(server_id):
     """Получает законы конкретного сервера"""
     current_time = time.time()
+    
+    # Проверяем кэш
     if server_id in laws_cache:
         cache_time, laws = laws_cache[server_id]
         if current_time - cache_time < CACHE_TIME:
-            return jsonify({"server_id": server_id, "laws": laws, "cached": True})
+            return jsonify({
+                "server_id": server_id,
+                "laws": laws,
+                "cached": True
+            })
     
     if server_id not in SERVERS:
         return jsonify({"error": "Server not found"}), 404
@@ -95,18 +122,27 @@ def get_laws(server_id):
     server = SERVERS[server_id]
     all_laws = []
     
+    # Если несколько ссылок (как у Детройта)
     if 'urls' in server:
         for url in server['urls']:
-            all_laws.extend(parse_forum_section(url))
+            section_laws = parse_forum_section(url)
+            all_laws.extend(section_laws)
     else:
         all_laws = parse_forum_section(server['url'])
     
+    # Сохраняем в кэш
     laws_cache[server_id] = (current_time, all_laws)
-    return jsonify({"server_id": server_id, "server_name": server['name'], "laws": all_laws, "cached": False})
+    
+    return jsonify({
+        "server_id": server_id,
+        "server_name": server['name'],
+        "laws": all_laws,
+        "cached": False
+    })
 
 @app.route('/api/ask', methods=['POST'])
 def ask_ai():
-    """Отправляет вопрос в OpenRouter с бесплатной моделью"""
+    """Отправляет вопрос в OpenRouter с бесплатными моделями"""
     try:
         data = request.json
         question = data.get('question', '')
@@ -122,77 +158,66 @@ def ask_ai():
         server_name = SERVERS.get(server_id, {}).get('name', f'Server {server_id}')
         
         prompt = f"""Ты - юридический помощник для RP сервера {server_name} (ID: {server_id}). 
-Отвечай на русском языке строго по следующей структуре. Используй те же заголовки и эмодзи.
+Отвечай на русском языке строго по следующей структуре:
 
 📌 1. КРАТКИЙ ИТОГ:
-[Один четкий ответ: можно ли это делать или нет, разрешено или запрещено]
+[Один четкий ответ: можно ли это делать или нет]
 
 ---
 
-⚖️ 2. АНАЛИЗ ЗАКОНОДАТЕЛЬСТВА ШТАТА:
-Применимые статьи (перечисли все статьи из предоставленных законов, которые относятся к вопросу):
-
-[Название закона], статья [номер]: «[прямая цитата из закона]»
-[Название закона], статья [номер]: «[прямая цитата из закона]»
-
-(Добавь все подходящие статьи)
+⚖️ 2. АНАЛИЗ ЗАКОНОДАТЕЛЬСТВА:
+[Анализ на основе предоставленных законов]
 
 ---
 
 💡 3. ЮРИДИЧЕСКАЯ КОНСУЛЬТАЦИЯ:
-[Развернутое объяснение на основе статей, почему это так, как применять законы в данной ситуации]
+[Развернутое объяснение]
 
 ---
 
-🚀 4. РЕКОМЕНДАЦИИ / СЛЕДУЮЩИЕ ШАГИ:
-*   [Конкретные действия для сотрудника/гражданина]
-*   [Что делать, если]
-*   [Как избежать нарушений]
-
----
-
-🌐 5. СРАВНИТЕЛЬНО-ПРАВОВОЙ КОММЕНТАРИЙ:
-[Сравнение с общей практикой, пояснение логики законов]
+🚀 4. РЕКОМЕНДАЦИИ:
+[Что делать в данной ситуации]
 
 Законы сервера для анализа:
 {laws_text}
 
-Вопрос пользователя: {question}
+Вопрос пользователя: {question}"""
 
-Твоя задача - проанализировать ситуацию и ответить строго по указанной структуре.
-Используй только информацию из предоставленных законов. Если законов нет - честно скажи, что информации недостаточно."""
-
-        response = requests.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Authorization': f'Bearer {OPENROUTER_API_KEY}',
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'https://top4ik202118-cloud.github.io/alegrobas-bot/',
-                'X-Title': 'Alegrobas Bot'
-            },
-            json={
-                'model': 'openrouter/hunter-alpha',
-                'messages': [
-                    {'role': 'system', 'content': 'Ты юридический помощник для RP серверов. Отвечай строго по структуре с заголовками и эмодзи.'},
-                    {'role': 'user', 'content': prompt}
-                ],
-                'temperature': 0.3,
-                'max_tokens': 2000
-            },
-            timeout=60
-        )
+        # Пробуем модели по очереди
+        for model in FREE_MODELS:
+            try:
+                response = requests.post(
+                    'https://openrouter.ai/api/v1/chat/completions',
+                    headers={
+                        'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+                        'Content-Type': 'application/json',
+                        'HTTP-Referer': 'https://top4ik202118-cloud.github.io/alegrobas-bot/',
+                        'X-Title': 'Alegrobas Bot'
+                    },
+                    json={
+                        'model': model,
+                        'messages': [
+                            {'role': 'system', 'content': 'Ты юридический помощник для RP серверов.'},
+                            {'role': 'user', 'content': prompt}
+                        ],
+                        'temperature': 0.3,
+                        'max_tokens': 2000
+                    },
+                    timeout=15
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = result['choices'][0]['message']['content']
+                    return jsonify({'answer': answer})
+                    
+            except Exception as e:
+                print(f"Model {model} failed: {e}")
+                continue
         
-        if response.status_code != 200:
-            return jsonify({'error': f'OpenRouter API returned {response.status_code}'}), 500
+        # Если все модели упали
+        return jsonify({'answer': '⚠️ ИИ временно недоступен. Попробуйте позже или используйте раздел "Законка".'})
         
-        result = response.json()
-        
-        if 'choices' in result and len(result['choices']) > 0:
-            answer = result['choices'][0]['message']['content']
-            return jsonify({'answer': answer})
-        else:
-            return jsonify({'error': 'No response from AI'}), 500
-            
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
