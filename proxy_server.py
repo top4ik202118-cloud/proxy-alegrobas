@@ -10,7 +10,7 @@ app = Flask(__name__)
 CORS(app, origins=['*'])
 
 # Твой ключ OpenRouter (создай новый если старый отключился)
-OPENROUTER_API_KEY = "sk-or-v1-НОВЫЙ_КЛЮЧ_СЮДА"
+OPENROUTER_API_KEY = "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"
 
 # Кэш для законов
 laws_cache = {}
@@ -45,6 +45,7 @@ def parse_xenforo_thread(url):
     }
     try:
         response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'utf-8'  # Явно указываем кодировку
         soup = BeautifulSoup(response.text, 'html.parser')
         first_post = soup.select_one('.message-main .bbWrapper')
         if first_post:
@@ -62,6 +63,7 @@ def parse_forum_section(url):
     try:
         print(f"Parsing section: {url}")
         response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'utf-8'  # Явно указываем кодировку
         soup = BeautifulSoup(response.text, 'html.parser')
         threads = soup.select('.structItem--thread')
         
@@ -107,7 +109,7 @@ def get_laws(server_id):
 
 @app.route('/api/ask', methods=['POST'])
 def ask_ai():
-    """Отправляет вопрос в OpenRouter с жёстким условием отвечать ТОЛЬКО по законам"""
+    """Отправляет вопрос в OpenRouter с правильной кодировкой"""
     try:
         data = request.json
         question = data.get('question', '')
@@ -116,88 +118,61 @@ def ask_ai():
         
         # Формируем текст законов для контекста
         laws_text = ""
-        for law in server_laws[:10]:
+        for law in server_laws[:5]:  # Берем только 5 законов чтобы не перегружать
             if law.get('text'):
-                # Берём первые 500 символов каждого закона
-                short_text = law['text'][:500] + "..." if len(law['text']) > 500 else law['text']
+                # Берём первые 300 символов каждого закона
+                short_text = law['text'][:300] + "..." if len(law['text']) > 300 else law['text']
                 laws_text += f"\n📌 {law['title']}:\n{short_text}\n"
         
         server_name = SERVERS.get(server_id, {}).get('name', f'Сервер {server_id}')
         
-        # Жёсткий промпт — отвечать ТОЛЬКО по законам
-        prompt = f"""Ты — юридический ИИ-помощник для RP сервера {server_name}.
+        # Простой промпт без сложных символов
+        prompt = f"""Ты юридический помощник для RP сервера {server_name}.
 
-⚠️ **ВАЖНЕЙШЕЕ ПРАВИЛО:**
-Отвечай ТОЛЬКО на основе законов, которые я тебе дал ниже.
-НЕ используй никакие внешние знания, НЕ придумывай статьи.
-Если в законах нет информации для ответа — так и скажи.
-
-Законы сервера {server_name} (только на них и ссылайся):
+Законы сервера:
 {laws_text}
 
-Вопрос пользователя: {question}
+Вопрос: {question}
 
-Теперь дай ответ строго по этой структуре:
+Ответь строго по структуре:
+1. КРАТКИЙ ОТВЕТ: да/нет, можно/нельзя
+2. СТАТЬИ: какие статьи из законов подходят
+3. ОБЪЯСНЕНИЕ: почему
+4. РЕКОМЕНДАЦИЯ: что делать"""
 
-📌 1. КРАТКИЙ ИТОГ:
-[Одним предложением: да/нет, можно/нельзя, нарушение/не нарушение]
-
----
-
-⚖️ 2. ПРИМЕНИМЫЕ СТАТЬИ:
-[Перечисли ТОЛЬКО те статьи из законов выше, которые относятся к вопросу. Каждую статью с цитатой]
-
----
-
-💡 3. ЮРИДИЧЕСКОЕ ОБОСНОВАНИЕ:
-[Развернутое объяснение, почему именно эти статьи применимы. Основано ТОЛЬКО на тексте законов]
-
----
-
-🚀 4. РЕКОМЕНДАЦИЯ:
-[Что делать в этой ситуации, основываясь на законах]
-
----
-
-Если в предоставленных законах нет информации для ответа — напиши:
-❌ В предоставленных законах сервера {server_name} нет информации для ответа на этот вопрос."""
-
-        # Пробуем отправить в OpenRouter
-        try:
-            response = requests.post(
-                'https://openrouter.ai/api/v1/chat/completions',
-                headers={
-                    'Authorization': f'Bearer {OPENROUTER_API_KEY}',
-                    'Content-Type': 'application/json',
-                    'HTTP-Referer': 'https://top4ik202118-cloud.github.io/alegrobas-bot/',
-                    'X-Title': 'Alegrobas Bot'
-                },
-                json={
-                    'model': 'openrouter/hunter-alpha',  # Бесплатная модель
-                    'messages': [
-                        {'role': 'system', 'content': 'Ты юридический помощник для RP серверов. Отвечаешь ТОЛЬКО на основе предоставленных законов.'},
-                        {'role': 'user', 'content': prompt}
-                    ],
-                    'temperature': 0.1,  # Минимум творчества
-                    'max_tokens': 2000
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                answer = result['choices'][0]['message']['content']
-                return jsonify({'answer': answer})
-            else:
-                print(f"OpenRouter error: {response.status_code}")
-                print(f"Response: {response.text}")
-                return jsonify({'error': f'OpenRouter API returned {response.status_code}'}), 500
-                
-        except Exception as e:
-            print(f"OpenRouter failed: {e}")
-            return jsonify({'error': str(e)}), 500
+        # Отправляем с правильной кодировкой
+        response = requests.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            headers={
+                'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+                'Content-Type': 'application/json; charset=utf-8',
+                'Accept-Charset': 'utf-8',
+                'HTTP-Referer': 'https://top4ik202118-cloud.github.io/alegrobas-bot/',
+                'X-Title': 'Alegrobas Bot'
+            },
+            json={
+                'model': 'openrouter/hunter-alpha',
+                'messages': [
+                    {'role': 'system', 'content': 'Ты юридический помощник. Отвечай по законам.'},
+                    {'role': 'user', 'content': prompt}
+                ],
+                'temperature': 0.1,
+                'max_tokens': 1500
+            },
+            timeout=30
+        )
         
+        if response.status_code == 200:
+            result = response.json()
+            answer = result['choices'][0]['message']['content']
+            return jsonify({'answer': answer})
+        else:
+            print(f"OpenRouter error: {response.status_code}")
+            print(f"Response: {response.text}")
+            return jsonify({'error': f'OpenRouter API returned {response.status_code}'}), 500
+                
     except Exception as e:
+        print(f"Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/servers')
