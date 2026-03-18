@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 app = Flask(__name__)
 CORS(app, origins=['*'])
 
-# ===== GROQ API КЛЮЧ (твой новый) =====
+# ===== GROQ API КЛЮЧ =====
 GROQ_API_KEY = "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"
 
 # ===== КЭШ ДЛЯ ЗАКОНОВ =====
@@ -68,7 +68,12 @@ def parse_forum_section(url):
                 title = title_elem.get_text(strip=True)
                 thread_url = urljoin(url, title_elem['href'])
                 law_text = parse_xenforo_thread(thread_url)
-                laws.append({"title": title, "url": thread_url, "text": law_text})
+                if law_text:
+                    laws.append({
+                        "title": title,
+                        "url": thread_url,
+                        "text": law_text
+                    })
                 time.sleep(1)
     except Exception as e:
         print(f"Error parsing section {url}: {e}")
@@ -100,39 +105,56 @@ def get_laws(server_id):
 
 @app.route('/api/ask', methods=['POST'])
 def ask_ai():
-    """Отправляет вопрос в Groq (самый быстрый)"""
+    """Отправляет вопрос в Groq с нормальным контекстом"""
     try:
         data = request.json
         question = data.get('question', '')
         server_id = data.get('server_id')
         server_laws = data.get('laws', [])
         
-        # Формируем текст законов
-        laws_text = ""
-        for law in server_laws[:5]:  # 5 законов для контекста
+        if not server_laws:
+            return jsonify({'answer': '❌ Законы сервера не загружены. Попробуйте позже.'})
+        
+        # Формируем контекст из законов
+        laws_context = ""
+        for i, law in enumerate(server_laws[:10]):  # Берем 10 законов
             if law.get('text'):
-                short_text = law['text'][:400] + "..." if len(law['text']) > 400 else law['text']
-                laws_text += f"\n📌 {law['title']}:\n{short_text}\n"
+                laws_context += f"\n=== ЗАКОН {i+1}: {law['title']} ===\n"
+                laws_context += law['text'][:1000] + "\n"  # 1000 символов каждого закона
         
         server_name = SERVERS.get(server_id, {}).get('name', f'Сервер {server_id}')
         
-        # Промпт для Groq
-        prompt = f"""Ты юридический помощник для RP сервера {server_name}.
+        # Промпт, который заставляет Groq ДУМАТЬ
+        prompt = f"""Ты — судья в RP сервере {server_name}. Твоя задача — анализировать ситуации и выносить вердикты на основе законов.
 
-Законы сервера:
-{laws_text}
+Вот законы сервера (только на них и ссылайся):
+{laws_context}
 
-Вопрос пользователя: {question}
+Ситуация: {question}
 
-Ответь строго по структуре:
-📌 1. КРАТКИЙ ИТОГ: [да/нет, можно/нельзя, нарушение/не нарушение]
-⚖️ 2. ПРИМЕНИМЫЕ СТАТЬИ: [только те статьи из законов выше, которые относятся к вопросу]
-💡 3. ЮРИДИЧЕСКОЕ ОБОСНОВАНИЕ: [почему эти статьи применимы]
-🚀 4. РЕКОМЕНДАЦИЯ: [что делать в этой ситуации]
+Проанализируй ситуацию шаг за шагом:
+1. Что произошло? (кратко перескажи ситуацию)
+2. Какие законы из предоставленных могут быть применимы?
+3. Почему именно эти законы подходят?
+4. Есть ли в законах смягчающие или отягчающие обстоятельства?
+5. Какой вердикт?
 
-Отвечай ТОЛЬКО на основе законов выше. Если в законах нет информации — напиши: "❌ В предоставленных законах нет информации для ответа на этот вопрос"."""
+Теперь дай ответ строго по структуре:
 
-        # Отправляем в Groq (самый быстрый API в мире)
+📌 КРАТКИЙ ИТОГ:
+[одним предложением: виновен/не виновен, есть нарушение/нет]
+
+⚖️ ПРИМЕНИМЫЕ СТАТЬИ:
+• [статья 1] — [цитата из закона]
+• [статья 2] — [цитата из закона]
+
+💡 ЮРИДИЧЕСКИЙ АНАЛИЗ:
+[подробный разбор ситуации с ссылками на конкретные статьи]
+
+🚀 РЕКОМЕНДАЦИЯ:
+[что делать дальше: штраф, арест, предупреждение, вызвать прокурора и т.д.]"""
+
+        # Отправляем в Groq
         response = requests.post(
             'https://api.groq.com/openai/v1/chat/completions',
             headers={
@@ -140,13 +162,13 @@ def ask_ai():
                 'Content-Type': 'application/json'
             },
             json={
-                'model': 'llama-3.3-70b-versatile',  # Топ-модель для анализа
+                'model': 'llama-3.3-70b-versatile',
                 'messages': [
-                    {'role': 'system', 'content': 'Ты юридический помощник для RP серверов. Отвечай только на основе предоставленных законов.'},
+                    {'role': 'system', 'content': 'Ты судья в RP проекте. Твои ответы должны быть основаны только на предоставленных законах. Анализируй ситуацию глубоко, не ограничивайся простым поиском слов.'},
                     {'role': 'user', 'content': prompt}
                 ],
-                'temperature': 0.1,
-                'max_tokens': 2000
+                'temperature': 0.3,  # Немного творчества для анализа
+                'max_tokens': 3000
             },
             timeout=30
         )
@@ -158,7 +180,36 @@ def ask_ai():
         else:
             print(f"Groq error: {response.status_code}")
             print(f"Response: {response.text}")
-            return jsonify({'error': f'Groq API returned {response.status_code}'}), 500
+            
+            # Если Groq не сработал, пробуем запасной вариант
+            fallback_prompt = f"""Законы сервера {server_name} (кратко):
+{laws_context[:2000]}
+
+Вопрос: {question}
+
+Ответь кратко: есть нарушение или нет? Если да, то по какой статье?"""
+            
+            response2 = requests.post(
+                'https://api.groq.com/openai/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {GROQ_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'llama-3.1-8b-instant',  # Более быстрая модель
+                    'messages': [{'role': 'user', 'content': fallback_prompt}],
+                    'temperature': 0.1,
+                    'max_tokens': 1000
+                },
+                timeout=30
+            )
+            
+            if response2.status_code == 200:
+                result2 = response2.json()
+                answer2 = result2['choices'][0]['message']['content']
+                return jsonify({'answer': answer2})
+            else:
+                return jsonify({'error': f'Groq API error: {response.status_code}'}), 500
                 
     except Exception as e:
         print(f"Error: {str(e)}")
